@@ -36,6 +36,18 @@ func (s *Stats) MakeSpaceFor(size int64) error {
 	return nil
 }
 
+// Resize accounts for a paste whose content changed from oldSize to newSize.
+// The number of pastes is left unchanged.
+func (s *Stats) Resize(oldSize, newSize int64) error {
+	s.Lock()
+	defer s.Unlock()
+	if s.MaxStorage > 0 && s.storage-oldSize+newSize > s.MaxStorage {
+		return ErrReachedMaxStorage
+	}
+	s.storage += newSize - oldSize
+	return nil
+}
+
 func (s *Stats) FreeSpace(size int64) {
 	s.Lock()
 	s.number--

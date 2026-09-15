@@ -53,6 +53,139 @@ Each paste will be deleted after {{.LifeTime}}.
 </body>
 </html>
 `,
+	"/edit": `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.ID}} - pastecat</title>
+<style>
+:root {
+	color-scheme: light dark;
+}
+html {
+	height: 100%;
+	margin: 0;
+	background: #fff;
+}
+body {
+	height: 100%;
+	margin: 0;
+	box-sizing: border-box;
+	padding: 1ex;
+	background: rgba(219, 231, 245, 0.5);
+}
+#editor {
+	box-sizing: border-box;
+	display: block;
+	width: 100%;
+	height: 100%;
+	margin: 0;
+	padding: 1ex;
+	border: 0;
+	border-radius: 3px;
+	outline: none;
+	resize: none;
+	background: #fff;
+	color: #111;
+	font-family: SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+	font-size: 14px;
+	line-height: 1.5;
+	tab-size: 4;
+}
+#status {
+	position: fixed;
+	right: 8px;
+	bottom: 6px;
+	font-family: monospace;
+	font-size: 12px;
+	color: #888;
+	pointer-events: none;
+}
+@media (prefers-color-scheme: dark) {
+	html {
+		background: #1f1f1f;
+	}
+	#editor {
+		background: #1f1f1f;
+		color: #d4d4d4;
+	}
+	#status {
+		color: #777;
+	}
+}
+</style>
+</head>
+<body>
+<textarea id="editor" spellcheck="false" autofocus>{{.Content}}</textarea>
+<div id="status"></div>
+<script>
+(function () {
+	var editor = document.getElementById('editor');
+	var status = document.getElementById('status');
+	var timer = null;
+	var dirty = false;
+	var saving = false;
+
+	function setStatus(text, ok) {
+		status.textContent = text;
+		status.style.color = ok ? '' : '#c00';
+	}
+
+	function save() {
+		if (saving) { return; }
+		saving = true;
+		dirty = false;
+		fetch(location.pathname, {
+			method: 'POST',
+			headers: {'Content-Type': 'text/plain; charset=utf-8'},
+			body: editor.value
+		}).then(function (res) {
+			if (!res.ok) { throw new Error(res.status + ' ' + res.statusText); }
+			setStatus('saved', true);
+		}).catch(function (err) {
+			dirty = true;
+			setStatus('save failed: ' + err.message, false);
+		}).then(function () {
+			saving = false;
+			if (dirty) { save(); }
+		});
+	}
+
+	editor.addEventListener('input', function () {
+		dirty = true;
+		setStatus('...', true);
+		clearTimeout(timer);
+		timer = setTimeout(save, 800);
+	});
+
+	editor.addEventListener('keydown', function (e) {
+		if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+			e.preventDefault();
+			clearTimeout(timer);
+			save();
+			return;
+		}
+		if (e.key === 'Tab') {
+			e.preventDefault();
+			var start = editor.selectionStart;
+			var end = editor.selectionEnd;
+			editor.value = editor.value.slice(0, start) + '\t' + editor.value.slice(end);
+			editor.selectionStart = editor.selectionEnd = start + 1;
+			dirty = true;
+		}
+	});
+
+	window.addEventListener('pagehide', function () {
+		if (!dirty) { return; }
+		var blob = new Blob([editor.value], {type: 'text/plain; charset=utf-8'});
+		navigator.sendBeacon(location.pathname, blob);
+	});
+})();
+</script>
+</body>
+</html>
+`,
 	"/form": `<html>
 <body style="text-align:center">
 <div style="inline-block">

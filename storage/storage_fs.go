@@ -131,6 +131,29 @@ func (s *FileStore) Put(content []byte) (ID, error) {
 	return id, nil
 }
 
+func (s *FileStore) PutWithID(id ID, content []byte) error {
+	s.Lock()
+	defer s.Unlock()
+	pastePath := pathFromID(id)
+	if err := writeNewFile(pastePath, content); err != nil {
+		if !os.IsExist(err) {
+			return err
+		}
+		if err := os.Remove(pastePath); err != nil {
+			return err
+		}
+		if err := writeNewFile(pastePath, content); err != nil {
+			return err
+		}
+	}
+	s.cache[id] = fileCache{
+		path:    pastePath,
+		size:    int64(len(content)),
+		modTime: time.Now(),
+	}
+	return nil
+}
+
 func (s *FileStore) Delete(id ID) error {
 	s.Lock()
 	defer s.Unlock()
@@ -146,18 +169,43 @@ func (s *FileStore) Delete(id ID) error {
 	return nil
 }
 
+// namesDir holds pastes whose id is not one of the original random eight
+// character hexadecimal ids. Their file name is the hex encoding of the id.
+const namesDir = "names"
+
+// isHexID reports whether id is one of the original random eight character
+// hexadecimal ids.
+func isHexID(id ID) bool {
+	s := string(id)
+	if len(s) != idSize {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
+}
+
 func pathFromID(id ID) string {
-	hexID := id.String()
-	return filepath.Join(hexID[:2], hexID[2:])
+	if isHexID(id) {
+		s := id.String()
+		return filepath.Join(s[:2], s[2:])
+	}
+	return filepath.Join(namesDir, hex.EncodeToString([]byte(id)))
 }
 
 func idFromPath(path string) (ID, error) {
 	parts := strings.Split(path, string(filepath.Separator))
 	if len(parts) != 2 {
-		return ID{}, fmt.Errorf("invalid number of directories at %s", path)
+		return "", fmt.Errorf("invalid number of directories at %s", path)
+	}
+	if parts[0] == namesDir {
+		b, err := hex.DecodeString(parts[1])
+		if err != nil {
+			return "", fmt.Errorf("invalid name file at %s", path)
+		}
+		return NewID(string(b))
 	}
 	if len(parts[0]) != 2 {
-		return ID{}, fmt.Errorf("invalid directory name length at %s", path)
+		return "", fmt.Errorf("invalid directory name length at %s", path)
 	}
 	hexID := parts[0] + parts[1]
 	return IDFromString(hexID)
@@ -207,6 +255,22 @@ func setupSubdirs(topdir string, rec filepath.WalkFunc) error {
 		if err := setupSubdir(topdir, rec, byte(i)); err != nil {
 			return err
 		}
+	}
+	return setupNamesDir(topdir, rec)
+}
+
+func setupNamesDir(topdir string, rec filepath.WalkFunc) error {
+	if stat, err := os.Stat(namesDir); err == nil {
+		if !stat.IsDir() {
+			return fmt.Errorf("%s/%s exists but is not a directory", topdir, namesDir)
+		}
+		if err := filepath.Walk(namesDir, rec); err != nil {
+			return fmt.Errorf("cannot recover data directory %s/%s: %v", topdir, namesDir, err)
+		}
+		return nil
+	}
+	if err := os.Mkdir(namesDir, 0700); err != nil {
+		return fmt.Errorf("cannot create data directory %s/%s: %v", topdir, namesDir, err)
 	}
 	return nil
 }

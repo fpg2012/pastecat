@@ -124,6 +124,41 @@ func (s *MmapStore) Put(content []byte) (ID, error) {
 	return id, nil
 }
 
+func (s *MmapStore) PutWithID(id ID, content []byte) error {
+	s.Lock()
+	defer s.Unlock()
+	if cached, e := s.cache[id]; e {
+		cached.reading.Wait()
+		if err := cached.mmap.Unmap(); err != nil {
+			return err
+		}
+		if err := os.Remove(cached.path); err != nil {
+			return err
+		}
+		delete(s.cache, id)
+	}
+	path := pathFromID(id)
+	if err := writeNewFile(path, content); err != nil {
+		return err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	mmap, err := getMmap(f)
+	if err != nil {
+		return err
+	}
+	s.cache[id] = mmapCache{
+		path:    path,
+		modTime: time.Now(),
+		size:    int64(len(content)),
+		mmap:    mmap,
+	}
+	return nil
+}
+
 func (s *MmapStore) Delete(id ID) error {
 	s.Lock()
 	defer s.Unlock()

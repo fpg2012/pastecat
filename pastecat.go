@@ -10,6 +10,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/mvdan/pastecat/storage"
@@ -87,30 +88,77 @@ func (h httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// pageData is passed to every HTML template. Templates ignore the fields they
+// do not need.
+type pageData struct {
+	SiteURL   string
+	MaxSize   storage.ByteSize
+	LifeTime  time.Duration
+	FieldName string
+	// ID and Content are only used by the editor template
+	ID      string
+	Content string
+}
+
+func (h *httpHandler) executeTemplate(w http.ResponseWriter, name string, data pageData) {
+	data.SiteURL = *siteURL
+	data.MaxSize = maxSize
+	data.LifeTime = *lifeTime
+	data.FieldName = fieldName
+	if err := tmpl.ExecuteTemplate(w, name, data); err != nil {
+		log.Printf("Error executing template for %s: %v", name, err)
+	}
+}
+
+// wantsHTML reports whether the client is a web browser that would prefer the
+// editable web interface over the raw paste contents.
+func wantsHTML(r *http.Request) bool {
+	if _, raw := r.URL.Query()["raw"]; raw {
+		return false
+	}
+	return strings.Contains(r.Header.Get("Accept"), "text/html")
+}
+
+// reservedNames are URL paths that are handled specially and therefore cannot
+// be used as paste names.
+var reservedNames = map[string]bool{
+	"form":        true,
+	"redirect":    true,
+	"favicon.ico": true,
+}
+
+// nameToID maps a URL path to a paste id. Any non-empty name of up to the
+// maximum length is accepted.
+func nameToID(name string) (storage.ID, bool) {
+	if name == "" || reservedNames[name] {
+		return "", false
+	}
+	id, err := storage.NewID(name)
+	if err != nil {
+		return "", false
+	}
+	return id, true
+}
+
 func (h *httpHandler) handleGet(w http.ResponseWriter, r *http.Request) {
-	if _, e := templates[r.URL.Path]; e {
-		err := tmpl.ExecuteTemplate(w, r.URL.Path,
-			struct {
-				SiteURL   string
-				MaxSize   storage.ByteSize
-				LifeTime  time.Duration
-				FieldName string
-			}{
-				SiteURL:   *siteURL,
-				MaxSize:   maxSize,
-				LifeTime:  *lifeTime,
-				FieldName: fieldName,
-			})
-		if err != nil {
-			log.Printf("Error executing template for %s: %v", r.URL.Path, err)
-		}
+	if wantsHTML(r) {
+		h.handleWeb(w, r)
 		return
 	}
-	id, err := storage.IDFromString(r.URL.Path[1:])
-	if err != nil {
+	if _, e := templates[r.URL.Path]; e {
+		h.executeTemplate(w, r.URL.Path, pageData{})
+		return
+	}
+	name := strings.TrimPrefix(r.URL.Path, "/")
+	id, ok := nameToID(name)
+	if !ok {
 		http.Error(w, invalidID, http.StatusBadRequest)
 		return
 	}
+	h.servePaste(w, r, id)
+}
+
+func (h *httpHandler) servePaste(w http.ResponseWriter, r *http.Request, id storage.ID) {
 	paste, err := h.store.Get(id)
 	if err == storage.ErrPasteNotFound {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -125,8 +173,108 @@ func (h *httpHandler) handleGet(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, "", paste.ModTime(), paste)
 }
 
+// handleWeb serves the editable web interface. Unknown or invalid paste names
+// result in a new random paste.
+func (h *httpHandler) handleWeb(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/")
+	id, ok := nameToID(name)
+	if !ok {
+		h.redirectToNew(w, r)
+		return
+	}
+	content, err := h.readPaste(id)
+	if err == storage.ErrPasteNotFound {
+		if err := h.putPaste(id, nil); err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+	} else if err != nil {
+		log.Printf("Unknown error on GET: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	h.executeTemplate(w, "/edit", pageData{ID: name, Content: string(content)})
+}
+
+func (h *httpHandler) redirectToNew(w http.ResponseWriter, r *http.Request) {
+	id, err := h.createPaste(nil)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	http.Redirect(w, r, "/"+id.String(), http.StatusFound)
+}
+
+func (h *httpHandler) readPaste(id storage.ID) ([]byte, error) {
+	paste, err := h.store.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	defer paste.Close()
+	return ioutil.ReadAll(paste)
+}
+
+func (h *httpHandler) pasteSize(id storage.ID) (int64, bool, error) {
+	paste, err := h.store.Get(id)
+	if err == storage.ErrPasteNotFound {
+		return 0, false, nil
+	} else if err != nil {
+		return 0, false, err
+	}
+	defer paste.Close()
+	return paste.Size(), true, nil
+}
+
+// createPaste stores a new paste under a random id.
+func (h *httpHandler) createPaste(content []byte) (storage.ID, error) {
+	size := int64(len(content))
+	if err := h.stats.MakeSpaceFor(size); err != nil {
+		return "", err
+	}
+	id, err := h.store.Put(content)
+	if err != nil {
+		h.stats.FreeSpace(size)
+		return id, err
+	}
+	storage.SetupPasteDeletion(h.store, h.stats, id, size, *lifeTime)
+	return id, nil
+}
+
+// putPaste creates or overwrites the paste stored under id.
+func (h *httpHandler) putPaste(id storage.ID, content []byte) error {
+	size := int64(len(content))
+	oldSize, existed, err := h.pasteSize(id)
+	if err != nil {
+		return err
+	}
+	if existed {
+		if err := h.stats.Resize(oldSize, size); err != nil {
+			return err
+		}
+	} else if err := h.stats.MakeSpaceFor(size); err != nil {
+		return err
+	}
+	if err := h.store.PutWithID(id, content); err != nil {
+		if existed {
+			h.stats.Resize(size, oldSize)
+		} else {
+			h.stats.FreeSpace(size)
+		}
+		return err
+	}
+	storage.SetupPasteDeletion(h.store, h.stats, id, size, *lifeTime)
+	return nil
+}
+
 func (h *httpHandler) handlePost(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, int64(maxSize))
+	// A POST to a valid paste name saves that paste (used by the web editor).
+	if name := strings.TrimPrefix(r.URL.Path, "/"); name != "" {
+		if id, ok := nameToID(name); ok {
+			h.handleSave(w, r, id)
+			return
+		}
+	}
+	h.limitBody(w, r)
 	content, err := getContentFromForm(r)
 	size := int64(len(content))
 	if err != nil {
@@ -150,6 +298,29 @@ func (h *httpHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, url, 302)
 	default:
 		fmt.Fprintln(w, url)
+	}
+}
+
+// handleSave stores the request body as the paste with the given id.
+func (h *httpHandler) handleSave(w http.ResponseWriter, r *http.Request, id storage.ID) {
+	h.limitBody(w, r)
+	content, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+		return
+	}
+	if err := h.putPaste(id, content); err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// limitBody caps the request body at maxSize, unless maxSize is zero (meaning
+// no limit).
+func (h *httpHandler) limitBody(w http.ResponseWriter, r *http.Request) {
+	if maxSize > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, int64(maxSize))
 	}
 }
 

@@ -27,6 +27,18 @@ Fetch it:
 Doing a `POST` on `/redirect` will send you directly to the paste instead of
 returning its url.
 
+### Web interface
+
+Open the site in a browser and you will get a random paste with a full-page
+plaintext editor. Opening `/{name}` edits that paste, creating it empty if it
+does not exist yet. Edits are saved automatically (debounced), on `Ctrl`/`Cmd`
+`+ S`, and when leaving the page.
+
+`{name}` can be any string of up to 200 characters, so
+`http://my.site/notes` is a paste named `notes`. The reserved paths `/form`
+and `/redirect` cannot be used. Append `?raw` (or just use `curl`) to get the
+raw contents instead of the editor.
+
 ### Run
 
 ##### Quick setup

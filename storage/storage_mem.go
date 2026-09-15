@@ -80,6 +80,17 @@ func (s *MemStore) Put(content []byte) (ID, error) {
 	return id, nil
 }
 
+func (s *MemStore) PutWithID(id ID, content []byte) error {
+	s.Lock()
+	defer s.Unlock()
+	s.cache[id] = memCache{
+		buffer:  content,
+		modTime: time.Now(),
+		size:    int64(len(content)),
+	}
+	return nil
+}
+
 func (s *MemStore) Delete(id ID) error {
 	s.Lock()
 	defer s.Unlock()
