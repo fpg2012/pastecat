@@ -210,14 +210,47 @@ body {
 		status.style.color = ok ? '' : '#c00';
 	}
 
+	var contentType = 'text/plain; charset=utf-8';
+	// Bodies smaller than this are cheaper to send as-is than to gzip.
+	var compressThreshold = 1024;
+
+	// encodeBody returns the body and headers to POST for the given text. It
+	// gzip-compresses the text when the browser supports CompressionStream and
+	// the text is large enough for compression to pay off.
+	function encodeBody(text) {
+		try {
+			if (typeof CompressionStream !== 'undefined' && text.length >= compressThreshold) {
+				var stream = new Blob([text]).stream()
+					.pipeThrough(new CompressionStream('gzip'));
+				return new Response(stream).arrayBuffer().then(function (buf) {
+					return {
+						body: buf,
+						headers: {
+							'Content-Type': contentType,
+							'Content-Encoding': 'gzip'
+						}
+					};
+				});
+			}
+		} catch (e) {
+			// Fall through to sending the text uncompressed.
+		}
+		return Promise.resolve({
+			body: text,
+			headers: {'Content-Type': contentType}
+		});
+	}
+
 	function save() {
 		if (saving) { return; }
 		saving = true;
 		dirty = false;
-		fetch(location.pathname, {
-			method: 'POST',
-			headers: {'Content-Type': 'text/plain; charset=utf-8'},
-			body: editor.value
+		encodeBody(editor.value).then(function (req) {
+			return fetch(location.pathname, {
+				method: 'POST',
+				headers: req.headers,
+				body: req.body
+			});
 		}).then(function (res) {
 			if (!res.ok) { throw new Error(res.status + ' ' + res.statusText); }
 			setStatus('saved', true);

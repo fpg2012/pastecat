@@ -4,9 +4,11 @@
 package main
 
 import (
+	"compress/gzip"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -98,7 +100,8 @@ type pageData struct {
 	// ID and Content are only used by the editor template
 	ID      string
 	Content string
-	// Number enables the line-number gutter in the editor template
+	// Number controls the line-number gutter in the editor template. It is on
+	// by default and can be disabled with ?number=0.
 	Number bool
 }
 
@@ -198,7 +201,7 @@ func (h *httpHandler) handleWeb(w http.ResponseWriter, r *http.Request) {
 	h.executeTemplate(w, "/edit", pageData{
 		ID:      name,
 		Content: string(content),
-		Number:  r.URL.Query().Get("number") == "1",
+		Number:  r.URL.Query().Get("number") != "0",
 	})
 }
 
@@ -314,7 +317,7 @@ func (h *httpHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 // handleSave stores the request body as the paste with the given id.
 func (h *httpHandler) handleSave(w http.ResponseWriter, r *http.Request, id storage.ID) {
 	h.limitBody(w, r)
-	content, err := ioutil.ReadAll(r.Body)
+	content, err := readBody(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
 		return
@@ -324,6 +327,93 @@ func (h *httpHandler) handleSave(w http.ResponseWriter, r *http.Request, id stor
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// readBody reads the request body, decompressing it when the client used
+// Content-Encoding: gzip. maxSize is enforced on the decompressed content, so
+// a small compressed body cannot expand into an oversized paste.
+func readBody(r *http.Request) ([]byte, error) {
+	var reader io.Reader = r.Body
+	if strings.EqualFold(r.Header.Get("Content-Encoding"), "gzip") {
+		gz, err := gzip.NewReader(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		defer gz.Close()
+		reader = gz
+	}
+	if maxSize <= 0 {
+		return ioutil.ReadAll(reader)
+	}
+	content, err := ioutil.ReadAll(io.LimitReader(reader, int64(maxSize)+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(content)) > int64(maxSize) {
+		return nil, fmt.Errorf("paste exceeds maximum size of %s", maxSize)
+	}
+	return content, nil
+}
+
+// gzipHandler transparently compresses responses when the client supports it.
+// Requests with a Range header are left untouched so that http.ServeContent
+// can still serve partial content.
+func gzipHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "HEAD" || r.Header.Get("Range") != "" ||
+			!strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		gw := &gzipResponseWriter{ResponseWriter: w}
+		defer gw.Close()
+		next.ServeHTTP(gw, r)
+	})
+}
+
+// gzipResponseWriter compresses the response body on the fly. Responses with no
+// body (204, 304) are passed through unchanged.
+type gzipResponseWriter struct {
+	http.ResponseWriter
+	gz          *gzip.Writer
+	wroteHeader bool
+}
+
+func (w *gzipResponseWriter) WriteHeader(code int) {
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
+	if code == http.StatusNoContent || code == http.StatusNotModified {
+		w.ResponseWriter.WriteHeader(code)
+		return
+	}
+	w.startGzip()
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *gzipResponseWriter) Write(p []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	if w.gz == nil {
+		return w.ResponseWriter.Write(p)
+	}
+	return w.gz.Write(p)
+}
+
+func (w *gzipResponseWriter) startGzip() {
+	w.Header().Del("Content-Length")
+	w.Header().Set("Content-Encoding", "gzip")
+	w.Header().Add("Vary", "Accept-Encoding")
+	w.gz = gzip.NewWriter(w.ResponseWriter)
+}
+
+func (w *gzipResponseWriter) Close() error {
+	if w.gz != nil {
+		return w.gz.Close()
+	}
+	return nil
 }
 
 // limitBody caps the request body at maxSize, unless maxSize is zero (meaning
@@ -430,6 +520,7 @@ func main() {
 	if *timeout > 0 {
 		finalHandler = http.TimeoutHandler(finalHandler, *timeout, "")
 	}
+	finalHandler = gzipHandler(finalHandler)
 	http.Handle("/", finalHandler)
 	log.Println("Up and running!")
 	log.Fatal(http.ListenAndServe(*listen, nil))
