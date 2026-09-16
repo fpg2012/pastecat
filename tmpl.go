@@ -164,13 +164,45 @@ body {
 	var dirty = false;
 	var saving = false;
 
-	function updateGutter() {
+	var lineHeight = 21;
+	var gutterCount = -1, gutterFirst = -1, gutterLast = -1;
+	var gutterScheduled = false;
+
+	// renderGutter only draws the line numbers that are visible in the editor
+	// viewport, so its cost does not grow with the size of the paste. This keeps
+	// pasting and typing in large pastes fast.
+	function renderGutter() {
+		gutterScheduled = false;
 		if (!gutter) { return; }
-		var count = editor.value.split('\n').length;
-		var lines = new Array(count);
-		for (var i = 1; i <= count; i++) { lines[i - 1] = i; }
-		gutter.textContent = lines.join('\n');
-		gutter.style.transform = 'translateY(' + (-editor.scrollTop) + 'px)';
+		var value = editor.value;
+		var count = 1;
+		for (var i = 0; i < value.length; i++) {
+			if (value.charCodeAt(i) === 10) { count++; }
+		}
+		var lh = parseFloat(getComputedStyle(gutter).lineHeight);
+		if (lh > 0) { lineHeight = lh; }
+		var first = Math.floor(editor.scrollTop / lineHeight);
+		if (first < 0) { first = 0; }
+		if (first > count - 1) { first = count - 1; }
+		var last = first + Math.ceil(editor.clientHeight / lineHeight) + 2;
+		if (last > count) { last = count; }
+		if (count !== gutterCount || first !== gutterFirst || last !== gutterLast) {
+			var lines = new Array(last - first);
+			for (var n = 0; n < lines.length; n++) { lines[n] = first + n + 1; }
+			gutter.textContent = lines.join('\n');
+			gutterCount = count;
+			gutterFirst = first;
+			gutterLast = last;
+		}
+		gutter.style.transform = 'translateY(' + (first * lineHeight - editor.scrollTop) + 'px)';
+	}
+
+	// updateGutter coalesces the (possibly many) calls triggered by a single
+	// edit into one gutter redraw on the next animation frame.
+	function updateGutter() {
+		if (!gutter || gutterScheduled) { return; }
+		gutterScheduled = true;
+		requestAnimationFrame(renderGutter);
 	}
 
 	function setStatus(text, ok) {
@@ -207,9 +239,7 @@ body {
 	});
 
 	editor.addEventListener('scroll', function () {
-		if (gutter) {
-			gutter.style.transform = 'translateY(' + (-editor.scrollTop) + 'px)';
-		}
+		updateGutter();
 	});
 
 	editor.addEventListener('keydown', function (e) {
