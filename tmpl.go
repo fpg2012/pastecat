@@ -75,10 +75,37 @@ body {
 	padding: 1ex;
 	background: rgba(219, 231, 245, 0.5);
 }
+#wrap {
+	display: flex;
+	height: 100%;
+}
+#gutter {
+	box-sizing: border-box;
+	flex: none;
+	overflow: hidden;
+	padding: 1ex 0.75ex;
+	background: #eef1f5;
+	border-radius: 3px 0 0 3px;
+	user-select: none;
+}
+#gutterLines {
+	margin: 0;
+	text-align: right;
+	color: #99a;
+	font-family: SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+	font-size: 14px;
+	line-height: 1.5;
+	will-change: transform;
+}
+#gutter + #editor {
+	border-radius: 0 3px 3px 0;
+}
 #editor {
 	box-sizing: border-box;
 	display: block;
+	flex: 1 1 auto;
 	width: 100%;
+	min-width: 0;
 	height: 100%;
 	margin: 0;
 	padding: 1ex;
@@ -110,6 +137,12 @@ body {
 		background: #1f1f1f;
 		color: #d4d4d4;
 	}
+	#gutter {
+		background: #2a2a2a;
+	}
+	#gutterLines {
+		color: #666;
+	}
 	#status {
 		color: #777;
 	}
@@ -117,15 +150,28 @@ body {
 </style>
 </head>
 <body>
-<textarea id="editor" spellcheck="false" autofocus>{{.Content}}</textarea>
+<div id="wrap">
+{{if .Number}}<div id="gutter"><pre id="gutterLines">1</pre></div>{{end}}
+<textarea id="editor" spellcheck="false" autofocus{{if .Number}} wrap="off"{{end}}>{{.Content}}</textarea>
+</div>
 <div id="status"></div>
 <script>
 (function () {
 	var editor = document.getElementById('editor');
 	var status = document.getElementById('status');
+	var gutter = document.getElementById('gutterLines');
 	var timer = null;
 	var dirty = false;
 	var saving = false;
+
+	function updateGutter() {
+		if (!gutter) { return; }
+		var count = editor.value.split('\n').length;
+		var lines = new Array(count);
+		for (var i = 1; i <= count; i++) { lines[i - 1] = i; }
+		gutter.textContent = lines.join('\n');
+		gutter.style.transform = 'translateY(' + (-editor.scrollTop) + 'px)';
+	}
 
 	function setStatus(text, ok) {
 		status.textContent = text;
@@ -155,8 +201,15 @@ body {
 	editor.addEventListener('input', function () {
 		dirty = true;
 		setStatus('...', true);
+		updateGutter();
 		clearTimeout(timer);
 		timer = setTimeout(save, 800);
+	});
+
+	editor.addEventListener('scroll', function () {
+		if (gutter) {
+			gutter.style.transform = 'translateY(' + (-editor.scrollTop) + 'px)';
+		}
 	});
 
 	editor.addEventListener('keydown', function (e) {
@@ -173,8 +226,11 @@ body {
 			editor.value = editor.value.slice(0, start) + '\t' + editor.value.slice(end);
 			editor.selectionStart = editor.selectionEnd = start + 1;
 			dirty = true;
+			updateGutter();
 		}
 	});
+
+	updateGutter();
 
 	window.addEventListener('pagehide', function () {
 		if (!dirty) { return; }

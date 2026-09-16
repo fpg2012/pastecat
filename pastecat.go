@@ -98,6 +98,8 @@ type pageData struct {
 	// ID and Content are only used by the editor template
 	ID      string
 	Content string
+	// Number enables the line-number gutter in the editor template
+	Number bool
 }
 
 func (h *httpHandler) executeTemplate(w http.ResponseWriter, name string, data pageData) {
@@ -193,7 +195,11 @@ func (h *httpHandler) handleWeb(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	h.executeTemplate(w, "/edit", pageData{ID: name, Content: string(content)})
+	h.executeTemplate(w, "/edit", pageData{
+		ID:      name,
+		Content: string(content),
+		Number:  r.URL.Query().Get("number") == "1",
+	})
 }
 
 func (h *httpHandler) redirectToNew(w http.ResponseWriter, r *http.Request) {
@@ -202,7 +208,11 @@ func (h *httpHandler) redirectToNew(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	http.Redirect(w, r, "/"+id.String(), http.StatusFound)
+	url := "/" + id.String()
+	if r.URL.RawQuery != "" {
+		url += "?" + r.URL.RawQuery
+	}
+	http.Redirect(w, r, url, http.StatusFound)
 }
 
 func (h *httpHandler) readPaste(id storage.ID) ([]byte, error) {
